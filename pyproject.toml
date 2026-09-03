@@ -1,12 +1,15 @@
 [project]
 name = "weight-tracking"
 version = "0.1.0"
-description = "Plot weight data from a public Google Sheet."
+description = "Plot and forecast weight data from a public Google Sheet."
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "matplotlib>=3.11.1",
+    "numpy>=2.5.2",
     "polars>=1.44.1",
+    "scikit-learn>=1.9.0",
+    "statsmodels>=0.15.0",
 ]
 
 [tool.ruff]
@@ -29,7 +32,12 @@ convention = "google"
 "test_*.py" = ["PT009", "PT027"]
 
 [tool.pyrefly]
-project-includes = ["weight_tracking.py", "test_weight_tracking.py"]
+project-includes = [
+    "weight_tracking.py",
+    "weight_forecasting.py",
+    "test_weight_tracking.py",
+    "test_weight_forecasting.py",
+]
 python-version = "3.13"
 preset = "strict"
 

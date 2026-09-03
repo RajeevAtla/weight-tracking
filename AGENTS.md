@@ -7,9 +7,13 @@ assumptions from another project.
 ## Project Map
 
 - `weight_tracking.py`: Downloads the first Google Sheet tab and writes the
-  tracked `weight_over_time.png` chart.
+  tracked historical and forecast charts.
+- `weight_forecasting.py`: Pure preparation, model fitting, forecasting, and
+  rolling-origin validation for sparse weight measurements.
 - `test_weight_tracking.py`: Standard-library tests for the pure data and
-  chart-specification functions.
+  historical chart-specification functions.
+- `test_weight_forecasting.py`: Standard-library tests for model preparation,
+  forecasts, and temporal validation.
 - `pyproject.toml`: Project metadata, runtime dependencies, and Ruff/Pyrefly
   configuration.
 - `uv.lock`: Reproducible dependency resolution. Update it with uv when
@@ -44,7 +48,8 @@ uv run pyrefly check
 ```
 
 Use `uv run ruff format .` when a formatting change is intended. The chart
-generator writes `weight_over_time.png` next to the script.
+generator writes `weight_over_time.png` and `weight_forecast.png` next to the
+script.
 
 ## Code Rules
 
@@ -65,8 +70,14 @@ generator writes `weight_over_time.png` next to the script.
 - Preserve the data contract: use the `Date` and `Weight (lbs)` columns, drop
   invalid measurements, sort by date, and infer omitted years from source row
   order after the first full date.
+- Preserve one median model measurement per calendar date when duplicate rows
+  exist. Keep missing calendar dates missing for regular-grid models; never
+  interpolate them into training targets.
+- Use actual elapsed dates for irregular-date harmonic and Gaussian Process
+  models. Use expanding-window rolling-origin validation and compare every
+  candidate with the last-value baseline.
 - Keep generated chart output reproducible. Regenerate and commit the PNG
-  when chart code or source data behavior changes.
+  files when chart code or source data behavior changes.
 
 ## Change Workflow
 

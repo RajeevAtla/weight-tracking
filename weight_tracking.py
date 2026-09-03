@@ -17,6 +17,8 @@ import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import polars as pl
 
+from weight_forecasting import Forecast, ModelSelection, select_forecast
+
 # Use a non-interactive backend so chart generation also works in CI.
 mpl.use("Agg")
 
@@ -25,6 +27,7 @@ SHEET_CSV_URL = (
     "1qon9wSJhz9pmLyybgV68wkzmHTtT4hyc1cWcb56KOfs/export?format=csv&gid=0"
 )
 OUTPUT_PATH = Path(__file__).with_name("weight_over_time.png")
+FORECAST_OUTPUT_PATH = Path(__file__).with_name("weight_forecast.png")
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,12 +233,70 @@ def render_chart(spec: ChartSpec, output_path: Path) -> None:
     plt.close(fig)
 
 
+def render_forecast_chart(
+    spec: ChartSpec, forecast: Forecast, output_path: Path
+) -> None:
+    """Render observations, a forecast, and its approximate 95% interval.
+
+    Args:
+        spec: Immutable observed chart data and labels.
+        forecast: Future point predictions and intervals.
+        output_path: Destination path for the PNG file.
+
+    Returns:
+        None.
+    """
+    fig, axis = plt.subplots(figsize=(10, 6))
+    axis.plot(
+        mdates.date2num(spec.dates),
+        spec.weights,
+        marker="o",
+        markersize=2.5,
+        linewidth=1.25,
+        label="Observed",
+    )
+    forecast_dates = mdates.date2num(forecast.dates)
+    axis.plot(
+        forecast_dates,
+        forecast.values,
+        linestyle="--",
+        linewidth=1.5,
+        label=f"Forecast ({forecast.model_name.replace('_', ' ')})",
+    )
+    axis.fill_between(
+        forecast_dates,
+        forecast.lower,
+        forecast.upper,
+        alpha=0.2,
+        label="Approx. 95% interval",
+    )
+    axis.set_title(f"{spec.title} and Forecast")
+    axis.set_xlabel("Date")
+    axis.set_ylabel("Weight (lbs)")
+    axis.xaxis.set_major_locator(mdates.AutoDateLocator())
+    axis.xaxis.set_major_formatter(
+        mdates.ConciseDateFormatter(axis.xaxis.get_major_locator())
+    )
+    axis.grid(visible=True, alpha=0.3)
+    axis.legend()
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+
 def main() -> None:
     """Download the current measurements and save their chart."""
     data = parse_weight_data(fetch_csv(SHEET_CSV_URL))
     spec = build_chart_spec(data)
     render_chart(spec, OUTPUT_PATH)
+    selection: ModelSelection = select_forecast(data)
+    render_forecast_chart(spec, selection.forecast, FORECAST_OUTPUT_PATH)
     sys.stdout.write(f"Saved {len(spec.dates)} measurements to {OUTPUT_PATH}\n")
+    sys.stdout.write(
+        f"Selected {selection.score.model_name} with "
+        f"rolling CV MAE {selection.score.mae:.2f} lbs; "
+        f"saved forecast to {FORECAST_OUTPUT_PATH}\n"
+    )
 
 
 if __name__ == "__main__":
