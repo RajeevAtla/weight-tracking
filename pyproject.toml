@@ -8,3 +8,30 @@ dependencies = [
     "matplotlib>=3.11.1",
     "polars>=1.44.1",
 ]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "COM812", # Conflicts with the formatter.
+    "D203",   # Conflicts with D211.
+    "D213",   # Conflicts with D212.
+    "ISC001", # Conflicts with the formatter.
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.pyrefly]
+project-includes = ["weight_tracking.py"]
+python-version = "3.13"
+preset = "strict"
+
+[dependency-groups]
+dev = [
+    "pyrefly>=1.2.0",
+    "ruff>=0.16.6",
+]

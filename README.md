@@ -21,3 +21,17 @@ uv run python weight_tracking.py
 ```
 
 The Google Sheet must remain publicly readable.
+
+## Quality Checks
+
+```powershell
+uv run ruff check .
+uv run ruff format --check .
+uv run pyrefly check
+```
+
+To format the Python source locally:
+
+```powershell
+uv run ruff format .
+```
