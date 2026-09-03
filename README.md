@@ -25,6 +25,7 @@ The Google Sheet must remain publicly readable.
 ## Quality Checks
 
 ```powershell
+uv run python -m unittest discover --verbose
 uv run ruff check .
 uv run ruff format --check .
 uv run pyrefly check

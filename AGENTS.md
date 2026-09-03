@@ -8,6 +8,8 @@ assumptions from another project.
 
 - `weight_tracking.py`: Downloads the first Google Sheet tab and writes the
   tracked `weight_over_time.png` chart.
+- `test_weight_tracking.py`: Standard-library tests for the pure data and
+  chart-specification functions.
 - `pyproject.toml`: Project metadata, runtime dependencies, and Ruff/Pyrefly
   configuration.
 - `uv.lock`: Reproducible dependency resolution. Update it with uv when
@@ -35,6 +37,7 @@ Run these from the repository root:
 uv python install 3.13
 uv sync --locked
 uv run python weight_tracking.py
+uv run python -m unittest discover --verbose
 uv run ruff check .
 uv run ruff format --check .
 uv run pyrefly check
@@ -48,6 +51,10 @@ generator writes `weight_over_time.png` next to the script.
 - Keep functions small and give every function, including private helpers, a
   Google-style docstring with useful `Args`, `Returns`, and `Raises` sections
   where they apply.
+- Keep parsing, validation, and chart-specification functions pure. Isolate
+  network, Matplotlib, filesystem, and stdout effects in boundary functions.
+- Keep `parse_dates`, `parse_weight_data`, and `build_chart_spec` free of I/O;
+  keep `fetch_csv`, `render_chart`, and `main` as the explicit effect boundary.
 - Keep type annotations complete and compatible with Python 3.13. Pyrefly is
   configured with its strict preset; do not silence a type error without a
   specific reason.
@@ -67,11 +74,20 @@ generator writes `weight_over_time.png` next to the script.
 2. Make the smallest change that satisfies the request.
 3. Update `README.md` and this file when commands, behavior, dependencies, or
    project structure change.
-4. Run `uv sync --locked`, `uv run ruff check .`,
-   `uv run ruff format --check .`, and `uv run pyrefly check`.
+4. Run `uv sync --locked`, `uv run python -m unittest discover --verbose`,
+   `uv run ruff check .`, `uv run ruff format --check .`, and
+   `uv run pyrefly check`.
 5. Run the chart generator when its behavior or input contract changes.
 6. Review the diff, ensure no secrets or local configuration are included,
-   then commit only intentional files.
+   then commit only intentional files and push the completed commit to `origin`.
+
+## Delivery
+
+- When implementation and verification are complete, commit and push the
+  completed changes to the configured remote; do not leave finished work only
+  in the local worktree.
+- Never force-push or rewrite shared history. If a push fails, resolve the
+  underlying issue and verify the remote branch before reporting completion.
 
 ## Living Documentation
 
@@ -87,4 +103,5 @@ instead of letting exceptions accumulate.
 
 A change is complete when the implementation, README, `AGENTS.md`, tool
 configuration, lockfile, and CI commands agree; the documented checks pass;
-and the working tree contains only intentional tracked artifacts.
+the completed commit is pushed to `origin`; and the working tree contains only
+intentional tracked artifacts.

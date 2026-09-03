@@ -5,8 +5,11 @@ from __future__ import annotations
 
 import io
 import sys
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+from typing import cast
+from urllib.parse import urlparse
 from urllib.request import urlopen
 
 import matplotlib as mpl
@@ -22,6 +25,15 @@ SHEET_CSV_URL = (
     "1qon9wSJhz9pmLyybgV68wkzmHTtT4hyc1cWcb56KOfs/export?format=csv&gid=0"
 )
 OUTPUT_PATH = Path(__file__).with_name("weight_over_time.png")
+
+
+@dataclass(frozen=True, slots=True)
+class ChartSpec:
+    """Immutable values and labels required to render the chart."""
+
+    dates: tuple[date, ...]
+    weights: tuple[float, ...]
+    title: str
 
 
 def parse_dates(values: list[object]) -> list[date | None]:
@@ -64,9 +76,17 @@ def parse_dates(values: list[object]) -> list[date | None]:
                 continue
 
             year = previous_date.year
-            parsed_date = date(year, month_day.month, month_day.day)
+            try:
+                parsed_date = date(year, month_day.month, month_day.day)
+            except ValueError:
+                dates.append(None)
+                continue
             if parsed_date < previous_date:
-                parsed_date = date(year + 1, month_day.month, month_day.day)
+                try:
+                    parsed_date = date(year + 1, month_day.month, month_day.day)
+                except ValueError:
+                    dates.append(None)
+                    continue
 
         dates.append(parsed_date)
         previous_date = parsed_date
@@ -74,30 +94,51 @@ def parse_dates(values: list[object]) -> list[date | None]:
     return dates
 
 
-def load_weight_data() -> pl.DataFrame:
-    """Download and clean weight measurements from the configured sheet.
+def fetch_csv(url: str) -> bytes:
+    """Fetch CSV bytes from a public Google Sheets export.
+
+    Args:
+        url: Public CSV export URL.
+
+    Returns:
+        Raw bytes returned by the CSV endpoint.
+
+    Raises:
+        RuntimeError: If the URL cannot be downloaded.
+        ValueError: If the URL is not an HTTPS Google Sheets URL.
+    """
+    parsed_url = urlparse(url)
+    if parsed_url.scheme != "https" or parsed_url.hostname != "docs.google.com":
+        message = "Only HTTPS Google Sheets URLs are supported."
+        raise ValueError(message)
+
+    try:
+        # Network access is kept at the edge so the data pipeline stays pure.
+        with urlopen(url, timeout=30) as response:  # noqa: S310
+            return response.read()
+    except (OSError, ValueError) as error:
+        message = f"Could not download the Google Sheet: {error}"
+        raise RuntimeError(message) from error
+
+
+def parse_weight_data(csv_bytes: bytes) -> pl.DataFrame:
+    """Parse and clean weight measurements from CSV bytes.
+
+    Args:
+        csv_bytes: CSV content returned by the sheet export.
 
     Returns:
         A DataFrame containing sorted ``date`` and ``weight_lbs`` columns.
 
     Raises:
-        RuntimeError: If the sheet cannot be downloaded or parsed as CSV.
-        ValueError: If required columns or valid measurements are missing.
+        ValueError: If the CSV is invalid, required columns are missing, or no
+            valid measurements remain.
     """
     try:
-        # The sheet is intentionally read through its public CSV export, so no
-        # credentials or extra API dependency are needed.
-        with urlopen(SHEET_CSV_URL, timeout=30) as response:
-            csv_bytes = response.read()
-    except Exception as error:
-        message = f"Could not download the Google Sheet: {error}"
-        raise RuntimeError(message) from error
-
-    try:
         raw = pl.read_csv(io.BytesIO(csv_bytes), infer_schema_length=0)
-    except Exception as error:
+    except pl.exceptions.PolarsError as error:
         message = f"Could not read the sheet CSV: {error}"
-        raise RuntimeError(message) from error
+        raise ValueError(message) from error
 
     required_columns = {"Date", "Weight (lbs)"}
     missing_columns = required_columns - set(raw.columns)
@@ -128,27 +169,55 @@ def load_weight_data() -> pl.DataFrame:
     return cleaned
 
 
-def save_chart(data: pl.DataFrame) -> None:
-    """Save a line chart for the supplied weight measurements.
+def build_chart_spec(data: pl.DataFrame) -> ChartSpec:
+    """Build an immutable chart specification from sorted measurements.
 
     Args:
         data: A sorted DataFrame with ``date`` and ``weight_lbs`` columns.
 
     Returns:
+        Immutable dates, weights, and title for the chart renderer.
+
+    Raises:
+        ValueError: If the measurement DataFrame is empty.
+    """
+    if data.is_empty():
+        message = "Cannot build a chart specification from empty data."
+        raise ValueError(message)
+
+    dates = tuple(cast("list[date]", data["date"].to_list()))
+    weights = tuple(cast("list[float]", data["weight_lbs"].to_list()))
+    start_date = min(dates)
+    end_date = max(dates)
+
+    return ChartSpec(
+        dates=dates,
+        weights=weights,
+        title=f"Weight Over Time ({start_date:%b %d, %Y} - {end_date:%b %d, %Y})",
+    )
+
+
+def render_chart(spec: ChartSpec, output_path: Path) -> None:
+    """Render and save an immutable chart specification.
+
+    Args:
+        spec: Immutable chart data and labels.
+        output_path: Destination path for the PNG file.
+
+    Returns:
         None.
     """
-    start_date = data["date"].min()
-    end_date = data["date"].max()
-
+    # Matplotlib mutates a figure and writes the file; this is the deliberate
+    # imperative edge around the pure chart specification.
     fig, axis = plt.subplots(figsize=(10, 6))
     axis.plot(
-        data["date"].to_list(),
-        data["weight_lbs"].to_list(),
+        mdates.date2num(spec.dates),
+        spec.weights,
         marker="o",
         markersize=2.5,
         linewidth=1.25,
     )
-    axis.set_title(f"Weight Over Time ({start_date:%b %d, %Y} - {end_date:%b %d, %Y})")
+    axis.set_title(spec.title)
     axis.set_xlabel("Date")
     axis.set_ylabel("Weight (lbs)")
     axis.xaxis.set_major_locator(mdates.AutoDateLocator())
@@ -157,15 +226,16 @@ def save_chart(data: pl.DataFrame) -> None:
     )
     axis.grid(visible=True, alpha=0.3)
     fig.tight_layout()
-    fig.savefig(OUTPUT_PATH, dpi=150)
+    fig.savefig(output_path, dpi=150)
     plt.close(fig)
 
 
 def main() -> None:
     """Download the current measurements and save their chart."""
-    data = load_weight_data()
-    save_chart(data)
-    sys.stdout.write(f"Saved {len(data)} measurements to {OUTPUT_PATH}\n")
+    data = parse_weight_data(fetch_csv(SHEET_CSV_URL))
+    spec = build_chart_spec(data)
+    render_chart(spec, OUTPUT_PATH)
+    sys.stdout.write(f"Saved {len(spec.dates)} measurements to {OUTPUT_PATH}\n")
 
 
 if __name__ == "__main__":

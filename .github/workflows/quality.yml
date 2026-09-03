@@ -29,6 +29,9 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked
 
+      - name: Test
+        run: uv run python -m unittest discover --verbose
+
       - name: Lint
         run: uv run ruff check .
 
