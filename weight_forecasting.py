@@ -8,7 +8,7 @@ import warnings
 from dataclasses import dataclass
 from datetime import date, timedelta
 from itertools import pairwise
-from typing import cast
+from typing import Protocol, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -30,6 +30,39 @@ from statsmodels.tsa.statespace.structural import UnobservedComponents
 
 FloatArray = npt.NDArray[np.float64]
 
+
+class _HoltFit(Protocol):
+    """Methods used from a fitted Holt model."""
+
+    fittedvalues: object
+
+    def forecast(self, steps: int) -> object:
+        """Return sequence forecasts."""
+        ...
+
+
+class _StatePrediction(Protocol):
+    """Methods used from a state-space prediction result."""
+
+    predicted_mean: object
+
+    def conf_int(self, alpha: float) -> object:
+        """Return prediction intervals."""
+        ...
+
+
+class _StateSpaceFit(Protocol):
+    """Methods used from a fitted state-space model."""
+
+    def get_forecast(self, steps: int) -> _StatePrediction:
+        """Return future state-space predictions."""
+        ...
+
+    def get_prediction(self, start: int, end: int) -> _StatePrediction:
+        """Return historical state-space predictions."""
+        ...
+
+
 FORECAST_HORIZON_DAYS = 28
 MAX_BACKTEST_ORIGINS = 12
 MIN_TRAINING_POINTS = 28
@@ -43,7 +76,7 @@ SEASONAL_PERIODS = (7, 14, 28)
 
 @dataclass(frozen=True, slots=True)
 class Forecast:
-    """Point forecast and approximate 95% intervals for future dates."""
+    """Point estimates and approximate 95% intervals for requested dates."""
 
     model_name: str
     dates: tuple[date, ...]
@@ -201,6 +234,24 @@ def forecast_model(
     """
     prepared = prepare_model_data(data)
     return _forecast_prepared(prepared, model_name, forecast_dates)
+
+
+def model_history(data: pl.DataFrame, model_name: str) -> Forecast:
+    """Fit one model and estimate it across the observed dates.
+
+    Args:
+        data: Raw or prepared DataFrame with ``date`` and ``weight_lbs``.
+        model_name: Name returned by :func:`available_models`.
+
+    Returns:
+        Historical model estimates and approximate 95% intervals.
+
+    Raises:
+        ValueError: If the data or model name is invalid.
+        RuntimeError: If the selected model cannot be fitted.
+    """
+    prepared = prepare_model_data(data)
+    return _history_prepared(prepared, model_name)
 
 
 def backtest_models(
@@ -405,6 +456,45 @@ def _forecast_prepared(
     return _validate_forecast(forecast)
 
 
+def _history_prepared(data: pl.DataFrame, model_name: str) -> Forecast:
+    """Fit a model across already prepared observed measurements.
+
+    Args:
+        data: Prepared, sorted measurement data.
+        model_name: Model identifier.
+
+    Returns:
+        Historical model estimates and intervals.
+
+    Raises:
+        ValueError: If the model identifier is unknown.
+        RuntimeError: If a model fitting routine fails.
+    """
+    dates = tuple(data["date"].to_list())
+    weights = np.asarray(data["weight_lbs"].to_list(), dtype=np.float64)
+
+    if model_name == "last_value":
+        history = _last_value_history(dates, weights)
+    elif model_name == "seasonal_naive_7d":
+        history = _seasonal_naive_history(dates, weights, period=WEEKLY_PERIOD)
+    elif model_name == "damped_holt":
+        history = _damped_holt_history(dates, weights)
+    elif model_name == "kalman_trend":
+        history = _kalman_history(dates, weights, period=None)
+    elif model_name == "kalman_weekly":
+        history = _kalman_history(dates, weights, period=WEEKLY_PERIOD)
+    elif model_name.startswith("harmonic_ridge_"):
+        period = _period_from_model_name(model_name, "harmonic_ridge_")
+        history = _harmonic_ridge_history(dates, weights, period)
+    elif model_name.startswith("gaussian_process_"):
+        period = _period_from_model_name(model_name, "gaussian_process_")
+        history = _gaussian_process_history(dates, weights, period)
+    else:
+        message = f"Unknown forecasting model: {model_name}"
+        raise ValueError(message)
+    return _validate_forecast(history)
+
+
 def _validate_forecast(forecast: Forecast) -> Forecast:
     """Reject non-finite predictions or malformed prediction intervals.
 
@@ -539,6 +629,21 @@ def _last_value_forecast(
     )
 
 
+def _last_value_history(dates: tuple[date, ...], weights: FloatArray) -> Forecast:
+    """Estimate each observed date from the preceding measurement.
+
+    Args:
+        dates: Observed measurement dates.
+        weights: Observed weight values.
+
+    Returns:
+        Historical last-value estimates with a robust residual interval.
+    """
+    values = np.concatenate((weights[:1], weights[:-1]))
+    width = INTERVAL_Z * _residual_scale(np.diff(weights))
+    return _constant_interval_forecast("last_value", dates, values, width)
+
+
 def _seasonal_naive_forecast(
     dates: tuple[date, ...],
     weights: FloatArray,
@@ -573,6 +678,38 @@ def _seasonal_naive_forecast(
     )
 
 
+def _seasonal_naive_history(
+    dates: tuple[date, ...], weights: FloatArray, period: int
+) -> Forecast:
+    """Estimate observed dates from measurements one period earlier.
+
+    Args:
+        dates: Observed measurement dates.
+        weights: Observed weight values.
+        period: Seasonal period in days.
+
+    Returns:
+        Historical seasonal-naive estimates with a robust interval.
+    """
+    observed = dict(zip(dates, weights.tolist(), strict=True))
+    values = []
+    residuals = []
+    for index, day in enumerate(dates):
+        previous = observed.get(day - timedelta(days=period))
+        if previous is None:
+            previous = float(weights[max(0, index - 1)])
+        values.append(previous)
+        if day - timedelta(days=period) in observed:
+            residuals.append(float(weights[index]) - previous)
+    width = INTERVAL_Z * _residual_scale(np.asarray(residuals, dtype=np.float64))
+    return _constant_interval_forecast(
+        f"seasonal_naive_{period}d",
+        dates,
+        np.asarray(values, dtype=np.float64),
+        width,
+    )
+
+
 def _damped_holt_forecast(
     dates: tuple[date, ...], weights: FloatArray, forecast_dates: tuple[date, ...]
 ) -> Forecast:
@@ -585,6 +722,27 @@ def _damped_holt_forecast(
 
     Returns:
         Damped trend forecast with a residual-based interval.
+
+    Raises:
+        ValueError: If observations are too sparse or too few for the model.
+        RuntimeError: If the exponential-smoothing fit fails.
+    """
+    fitted = _fit_damped_holt(dates, weights)
+    fitted_values = np.asarray(fitted.fittedvalues, dtype=np.float64)
+    residuals = weights - fitted_values
+    width = INTERVAL_Z * _residual_scale(residuals)
+    return _sequence_forecast("damped_holt", fitted, dates, forecast_dates, width)
+
+
+def _fit_damped_holt(dates: tuple[date, ...], weights: FloatArray) -> _HoltFit:
+    """Fit a damped Holt model when the observation cadence is regular enough.
+
+    Args:
+        dates: Observed measurement dates.
+        weights: Observed weight values.
+
+    Returns:
+        Fitted exponential-smoothing model.
 
     Raises:
         ValueError: If observations are too sparse or too few for the model.
@@ -612,16 +770,28 @@ def _damped_holt_forecast(
     except (ValueError, np.linalg.LinAlgError, RuntimeError) as error:
         message = "Damped Holt could not be fitted."
         raise RuntimeError(message) from error
+    return cast("_HoltFit", fitted)
 
-    fitted_values = np.asarray(fitted.fittedvalues, dtype=np.float64)
-    residuals = weights - fitted_values
-    width = INTERVAL_Z * _residual_scale(residuals)
-    return _sequence_forecast("damped_holt", fitted, dates, forecast_dates, width)
+
+def _damped_holt_history(dates: tuple[date, ...], weights: FloatArray) -> Forecast:
+    """Estimate observed values with a fitted damped Holt model.
+
+    Args:
+        dates: Observed measurement dates.
+        weights: Observed weight values.
+
+    Returns:
+        Historical damped-trend estimates with a residual interval.
+    """
+    fitted = _fit_damped_holt(dates, weights)
+    values = np.asarray(fitted.fittedvalues, dtype=np.float64)
+    width = INTERVAL_Z * _residual_scale(weights - values)
+    return _constant_interval_forecast("damped_holt", dates, values, width)
 
 
 def _sequence_forecast(
     model_name: str,
-    fitted: object,
+    fitted: _HoltFit,
     dates: tuple[date, ...],
     forecast_dates: tuple[date, ...],
     width: float,
@@ -638,12 +808,7 @@ def _sequence_forecast(
     Returns:
         Forecast values selected at the estimated observation cadence.
 
-    Raises:
-        RuntimeError: If the fitted model does not expose a forecast method.
     """
-    if not hasattr(fitted, "forecast"):
-        message = "Fitted sequence model has no forecast method."
-        raise RuntimeError(message)
     forecast_method = fitted.forecast
     cadence = 1
     if len(dates) > 1:
@@ -686,13 +851,53 @@ def _kalman_forecast(
     Raises:
         RuntimeError: If the state-space model cannot be fitted.
     """
+    last_target = forecast_dates[-1]
+    fitted = _fit_kalman(dates, weights, last_target, period)
+    try:
+        prediction = fitted.get_forecast(steps=(last_target - dates[-1]).days)
+        values = np.asarray(prediction.predicted_mean, dtype=np.float64)
+        intervals = np.asarray(prediction.conf_int(alpha=0.05), dtype=np.float64)
+    except (ValueError, np.linalg.LinAlgError, RuntimeError) as error:
+        message = "Kalman model could not produce a forecast."
+        raise RuntimeError(message) from error
+
+    indexes = [(day - dates[-1]).days - 1 for day in forecast_dates]
+    return Forecast(
+        model_name="kalman_weekly" if period is not None else "kalman_trend",
+        dates=forecast_dates,
+        values=tuple(float(values[index]) for index in indexes),
+        lower=tuple(float(intervals[index, 0]) for index in indexes),
+        upper=tuple(float(intervals[index, 1]) for index in indexes),
+    )
+
+
+def _fit_kalman(
+    dates: tuple[date, ...],
+    weights: FloatArray,
+    end_date: date,
+    period: int | None,
+) -> _StateSpaceFit:
+    """Fit a missing-aware local trend state-space model through a date.
+
+    Args:
+        dates: Observed measurement dates.
+        weights: Observed weight values.
+        end_date: Last date included in the regular model grid.
+        period: Optional stochastic seasonal period in days.
+
+    Returns:
+        Fitted state-space model.
+
+    Raises:
+        ValueError: If a seasonal model has too few measurements.
+        RuntimeError: If the state-space model cannot be fitted.
+    """
     if period is not None and len(weights) < 2 * period:
         message = "Seasonal Kalman model has too few measurements."
         raise ValueError(message)
 
-    last_target = forecast_dates[-1]
     start_date = dates[0]
-    grid_length = (last_target - start_date).days + 1
+    grid_length = (end_date - start_date).days + 1
     grid_values = np.full(grid_length, np.nan, dtype=np.float64)
     for observed_date, weight in zip(dates, weights, strict=True):
         grid_values[(observed_date - start_date).days] = weight
@@ -710,17 +915,39 @@ def _kalman_forecast(
                 stochastic_trend=True,
                 stochastic_seasonal=period is not None,
             ).fit(disp=False, maxiter=200)
-        prediction = fitted.get_forecast(steps=(last_target - dates[-1]).days)
-        values = np.asarray(prediction.predicted_mean, dtype=np.float64)
-        intervals = np.asarray(prediction.conf_int(alpha=0.05), dtype=np.float64)
     except (ValueError, np.linalg.LinAlgError, RuntimeError) as error:
         message = "Kalman model could not be fitted."
         raise RuntimeError(message) from error
+    return cast("_StateSpaceFit", fitted)
 
-    indexes = [(day - dates[-1]).days - 1 for day in forecast_dates]
+
+def _kalman_history(
+    dates: tuple[date, ...], weights: FloatArray, period: int | None
+) -> Forecast:
+    """Estimate observed dates with a fitted state-space model.
+
+    Args:
+        dates: Observed measurement dates.
+        weights: Observed weight values.
+        period: Optional stochastic seasonal period in days.
+
+    Returns:
+        Historical state-space estimates and model-derived intervals.
+    """
+    fitted = _fit_kalman(dates, weights, dates[-1], period)
+    end_index = (dates[-1] - dates[0]).days
+    try:
+        prediction = fitted.get_prediction(start=0, end=end_index)
+        values = np.asarray(prediction.predicted_mean, dtype=np.float64)
+        intervals = np.asarray(prediction.conf_int(alpha=0.05), dtype=np.float64)
+    except (ValueError, np.linalg.LinAlgError, RuntimeError) as error:
+        message = "Kalman model could not produce historical estimates."
+        raise RuntimeError(message) from error
+
+    indexes = [(day - dates[0]).days for day in dates]
     return Forecast(
         model_name="kalman_weekly" if period is not None else "kalman_trend",
-        dates=forecast_dates,
+        dates=dates,
         values=tuple(float(values[index]) for index in indexes),
         lower=tuple(float(intervals[index, 0]) for index in indexes),
         upper=tuple(float(intervals[index, 1]) for index in indexes),
@@ -763,6 +990,36 @@ def _harmonic_ridge_forecast(
     )
 
 
+def _harmonic_ridge_history(
+    dates: tuple[date, ...], weights: FloatArray, period: int
+) -> Forecast:
+    """Estimate observed dates with harmonic Ridge regression.
+
+    Args:
+        dates: Observed measurement dates.
+        weights: Observed weight values.
+        period: Seasonal period in days.
+
+    Returns:
+        Historical harmonic estimates with a robust residual interval.
+
+    Raises:
+        ValueError: If too few observations are available for the features.
+    """
+    if len(weights) < MIN_FEATURE_POINTS:
+        message = "Harmonic regression requires at least ten measurements."
+        raise ValueError(message)
+    origin = dates[0]
+    train_features = _harmonic_features(_elapsed_days(dates, origin), period)
+    model = Ridge(alpha=1.0)
+    model.fit(train_features, weights)
+    values = np.asarray(model.predict(train_features), dtype=np.float64)
+    width = INTERVAL_Z * _residual_scale(weights - values)
+    return _constant_interval_forecast(
+        f"harmonic_ridge_{period}d", dates, values, width
+    )
+
+
 def _gaussian_process_forecast(
     dates: tuple[date, ...],
     weights: FloatArray,
@@ -783,14 +1040,59 @@ def _gaussian_process_forecast(
     Raises:
         RuntimeError: If the Gaussian Process cannot be fitted.
     """
-    if len(weights) < MIN_FEATURE_POINTS:
-        message = "Gaussian Process requires at least ten measurements."
-        raise ValueError(message)
-
     origin = dates[0]
     scale = 365.25
     train_days = _elapsed_days(dates, origin) / scale
     future_days = _elapsed_days(forecast_dates, origin) / scale
+    model = _fit_gaussian_process(train_days, weights, period)
+    try:
+        predictions, standard_deviation = cast(
+            "tuple[FloatArray, FloatArray]",
+            model.predict(future_days.reshape(-1, 1), return_std=True),
+        )
+    except (FloatingPointError, np.linalg.LinAlgError, ValueError) as error:
+        message = "Gaussian Process could not produce a forecast."
+        raise RuntimeError(message) from error
+
+    standard_deviation = np.maximum(
+        np.asarray(standard_deviation, dtype=np.float64), 0.0
+    )
+    predictions = np.asarray(predictions, dtype=np.float64)
+    return Forecast(
+        model_name=f"gaussian_process_{period}d",
+        dates=forecast_dates,
+        values=tuple(float(value) for value in predictions),
+        lower=tuple(
+            float(value) for value in predictions - INTERVAL_Z * standard_deviation
+        ),
+        upper=tuple(
+            float(value) for value in predictions + INTERVAL_Z * standard_deviation
+        ),
+    )
+
+
+def _fit_gaussian_process(
+    train_days: FloatArray, weights: FloatArray, period: int
+) -> GaussianProcessRegressor:
+    """Fit a Matérn plus quasi-periodic Gaussian Process.
+
+    Args:
+        train_days: Elapsed training times expressed in years.
+        weights: Observed weight values.
+        period: Seasonal period in days.
+
+    Returns:
+        Fitted Gaussian Process regressor.
+
+    Raises:
+        ValueError: If too few observations are available.
+        RuntimeError: If the Gaussian Process cannot be fitted.
+    """
+    if len(weights) < MIN_FEATURE_POINTS:
+        message = "Gaussian Process requires at least ten measurements."
+        raise ValueError(message)
+
+    scale = 365.25
     periodicity = period / scale
     kernel = (
         ConstantKernel(1.0, (1e-3, 1e3))
@@ -819,12 +1121,39 @@ def _gaussian_process_forecast(
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=SklearnConvergenceWarning)
             model.fit(train_days.reshape(-1, 1), weights)
-            predictions, standard_deviation = cast(
-                "tuple[FloatArray, FloatArray]",
-                model.predict(future_days.reshape(-1, 1), return_std=True),
-            )
     except (FloatingPointError, np.linalg.LinAlgError, ValueError) as error:
         message = "Gaussian Process could not be fitted."
+        raise RuntimeError(message) from error
+    return model
+
+
+def _gaussian_process_history(
+    dates: tuple[date, ...], weights: FloatArray, period: int
+) -> Forecast:
+    """Estimate observed dates with a fitted Gaussian Process.
+
+    Args:
+        dates: Observed measurement dates.
+        weights: Observed weight values.
+        period: Seasonal period in days.
+
+    Returns:
+        Historical Gaussian Process estimates and model-derived intervals.
+
+    Raises:
+        ValueError: If too few observations are available.
+        RuntimeError: If the Gaussian Process cannot be fitted.
+    """
+    origin = dates[0]
+    train_days = _elapsed_days(dates, origin) / 365.25
+    model = _fit_gaussian_process(train_days, weights, period)
+    try:
+        predictions, standard_deviation = cast(
+            "tuple[FloatArray, FloatArray]",
+            model.predict(train_days.reshape(-1, 1), return_std=True),
+        )
+    except (FloatingPointError, np.linalg.LinAlgError, ValueError) as error:
+        message = "Gaussian Process could not produce historical estimates."
         raise RuntimeError(message) from error
 
     standard_deviation = np.maximum(
@@ -833,7 +1162,7 @@ def _gaussian_process_forecast(
     predictions = np.asarray(predictions, dtype=np.float64)
     return Forecast(
         model_name=f"gaussian_process_{period}d",
-        dates=forecast_dates,
+        dates=dates,
         values=tuple(float(value) for value in predictions),
         lower=tuple(
             float(value) for value in predictions - INTERVAL_Z * standard_deviation

@@ -13,6 +13,7 @@ from weight_forecasting import (
     candidate_periods,
     forecast_model,
     make_forecast_dates,
+    model_history,
     prepare_model_data,
 )
 
@@ -107,6 +108,20 @@ class ForecastModelTests(unittest.TestCase):
                             forecast.lower,
                             forecast.values,
                             forecast.upper,
+                            strict=True,
+                        )
+                    )
+                )
+                history = model_history(data, model_name)
+                self.assertEqual(history.dates, tuple(data["date"].to_list()))
+                self.assertTrue(all(math.isfinite(value) for value in history.values))
+                self.assertTrue(
+                    all(
+                        lower <= value <= upper
+                        for lower, value, upper in zip(
+                            history.lower,
+                            history.values,
+                            history.upper,
                             strict=True,
                         )
                     )

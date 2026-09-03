@@ -76,6 +76,8 @@ script.
 - Use actual elapsed dates for irregular-date harmonic and Gaussian Process
   models. Use expanding-window rolling-origin validation and compare every
   candidate with the last-value baseline.
+- Keep the forecast chart's historical model estimates and forecast intervals
+  visibly distinct from the raw measurements and future forecast.
 - Keep generated chart output reproducible. Regenerate and commit the PNG
   files when chart code or source data behavior changes.
 

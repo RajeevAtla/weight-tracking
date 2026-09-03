@@ -24,6 +24,9 @@ uv run python weight_tracking.py
 
 The Google Sheet must remain publicly readable.
 
+The forecast chart overlays the selected model's historical estimates and
+95% interval before extending the same model into the future.
+
 ## Forecasting
 
 The script evaluates these conservative time-series models with recent

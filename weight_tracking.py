@@ -17,7 +17,12 @@ import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import polars as pl
 
-from weight_forecasting import Forecast, ModelSelection, select_forecast
+from weight_forecasting import (
+    Forecast,
+    ModelSelection,
+    model_history,
+    select_forecast,
+)
 
 # Use a non-interactive backend so chart generation also works in CI.
 mpl.use("Agg")
@@ -234,12 +239,16 @@ def render_chart(spec: ChartSpec, output_path: Path) -> None:
 
 
 def render_forecast_chart(
-    spec: ChartSpec, forecast: Forecast, output_path: Path
+    spec: ChartSpec,
+    history: Forecast,
+    forecast: Forecast,
+    output_path: Path,
 ) -> None:
-    """Render observations, a forecast, and its approximate 95% interval.
+    """Render observations, historical estimates, and a forecast interval.
 
     Args:
         spec: Immutable observed chart data and labels.
+        history: Historical model estimates and intervals.
         forecast: Future point predictions and intervals.
         output_path: Destination path for the PNG file.
 
@@ -255,21 +264,40 @@ def render_forecast_chart(
         linewidth=1.25,
         label="Observed",
     )
+    history_dates = mdates.date2num(history.dates)
+    axis.plot(
+        history_dates,
+        history.values,
+        linewidth=1.25,
+        color="tab:orange",
+        label="Historical model estimate",
+    )
+    axis.fill_between(
+        history_dates,
+        history.lower,
+        history.upper,
+        color="tab:orange",
+        alpha=0.12,
+        label="Historical 95% interval",
+    )
     forecast_dates = mdates.date2num(forecast.dates)
     axis.plot(
         forecast_dates,
         forecast.values,
         linestyle="--",
         linewidth=1.5,
+        color="tab:green",
         label=f"Forecast ({forecast.model_name.replace('_', ' ')})",
     )
     axis.fill_between(
         forecast_dates,
         forecast.lower,
         forecast.upper,
+        color="tab:green",
         alpha=0.2,
-        label="Approx. 95% interval",
+        label="Forecast 95% interval",
     )
+    axis.axvline(float(mdates.date2num(spec.dates[-1])), color="0.35", linestyle=":")
     axis.set_title(f"{spec.title} and Forecast")
     axis.set_xlabel("Date")
     axis.set_ylabel("Weight (lbs)")
@@ -290,7 +318,8 @@ def main() -> None:
     spec = build_chart_spec(data)
     render_chart(spec, OUTPUT_PATH)
     selection: ModelSelection = select_forecast(data)
-    render_forecast_chart(spec, selection.forecast, FORECAST_OUTPUT_PATH)
+    history = model_history(data, selection.score.model_name)
+    render_forecast_chart(spec, history, selection.forecast, FORECAST_OUTPUT_PATH)
     sys.stdout.write(f"Saved {len(spec.dates)} measurements to {OUTPUT_PATH}\n")
     sys.stdout.write(
         f"Selected {selection.score.model_name} with "
