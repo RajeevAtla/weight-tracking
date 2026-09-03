@@ -1,3 +1,23 @@
 # Weight Tracking
 
-A simple place to track weight over time.
+Fetches weight data from the configured public Google Sheet and saves a line
+chart as `weight_over_time.png`.
+
+## Setup
+
+Install Python and create the uv environment:
+
+```powershell
+uv python install 3.13
+uv sync
+```
+
+`uv sync` installs Polars and Matplotlib from `pyproject.toml`.
+
+## Run
+
+```powershell
+uv run python weight_tracking.py
+```
+
+The Google Sheet must remain publicly readable.

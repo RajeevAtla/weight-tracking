@@ -1,0 +1,10 @@
+[project]
+name = "weight-tracking"
+version = "0.1.0"
+description = "Plot weight data from a public Google Sheet."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "matplotlib>=3.11.1",
+    "polars>=1.44.1",
+]

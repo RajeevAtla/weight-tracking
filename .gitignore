@@ -1,1 +1,5 @@
 .opencode/
+.venv/
+__pycache__/
+*.py[cod]
+weight_over_time.png
